@@ -167,7 +167,7 @@ func main() {
 func doSelfUpdate() {
 	v := semver.MustParse(version)
 
-	latest, err := selfupdate.UpdateSelf(v, "JeordyR/SnapSync")
+	latest, err := selfupdate.UpdateSelf(v, "JeordyR/CacheFlush")
 	if err != nil {
 		println("Binary update failed:", err)
 		return
