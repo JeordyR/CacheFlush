@@ -21,7 +21,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const version = "0.0.2"
+const version = "0.0.3"
 
 var config cacheflushConfig
 var log = logrus.New()
