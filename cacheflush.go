@@ -207,7 +207,7 @@ func sendPushoverMessage(message string, messageArgs ...string) {
 	log.Debug("Pushover response: ", response)
 
 	// Short sleep to ensure rapid messages arrive in order
-	time.Sleep(1)
+	time.Sleep(1 * time.Millisecond)
 }
 
 func getCachedFiles(cacheDrive string) ([]fileDetails, []fileDetails, []fileDetails) {
