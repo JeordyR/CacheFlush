@@ -35,6 +35,9 @@ type fileDetails struct {
 }
 
 func main() {
+	// Check for updates
+	doSelfUpdate()
+
 	// Parse input
 	configFile := flag.String("config", "", "Path to configuration file.")
 	skipMove := flag.Bool("skipmove", false, "True/false if we should skip moving files, useful for debugging.")
