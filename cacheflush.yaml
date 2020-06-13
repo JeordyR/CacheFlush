@@ -1,0 +1,27 @@
+# Log Settings
+LogFile: "/var/log/cacheflush.log"
+DebugLogging: false
+
+# Permission Settings
+OwnerUID: 1000
+OwnerGID: 1000
+
+# Path Settings
+BackingPool: /mnt/storage-nocache
+CacheDrives:
+    - /mnt/cache/cache01
+OverrideDirectories:
+    - /scripts/
+    - /.git/
+
+# Behavior Settings
+ForceFreeSpace: 200GB
+MinimumAge: 2d
+CurrentAccessThreshold: 60m
+FlushPolicy: oldest-first # oldest-first, least-accessed, largest-first
+ClearEmptyDirs: false
+
+# Pushover Settings
+PushoverEnabled: false
+PushoverAppKey: ""
+PushoverUserKey: ""

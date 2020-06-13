@@ -13,9 +13,9 @@ type cacheflushConfig struct {
 	LogFile      string `yaml:"LogFile"`
 	DebugLogging bool   `yaml:"DebugLogging"`
 
-	// Runtime Settings
-	RunUID int `yaml:"RunUID"`
-	RunGID int `yaml:"RunGID"`
+	// Permission Settings
+	OwnerUID uint32 `yaml:"OwnerUID"`
+	OwnerGID uint32 `yaml:"OwnerGID"`
 
 	// Path Settings
 	BackingPool         string   `yaml:"BackingPool"`
@@ -25,9 +25,11 @@ type cacheflushConfig struct {
 	// Behavior Settings
 	ForceFreeSpace         string `yaml:"ForceFreeSpace"`
 	MinimumAge             string `yaml:"MinimumAge"`
-	MaximumAge             string `yaml:"MaximumAge"`
 	CurrentAccessThreshold string `yaml:"CurrentAccessThreshold"`
 	FlushPolicy            string `yaml:"FlushPolicy"`
+	ClearEmptyDirs         bool   `yaml:"ClearEmptyDirs"`
+	SkipMove               bool   `yaml:"SkipMove,omitempty"`
+	Force                  bool   `yaml:"Force,omitempty"`
 
 	// Pushover Settings
 	PushoverEnabled bool   `yaml:"PushoverEnabled,omitempty"`
@@ -35,8 +37,8 @@ type cacheflushConfig struct {
 	PushoverUserKey string `yaml:"PushoverUserKey,omitempty"`
 }
 
-func (self *cacheflushConfig) isValidPolicy() bool {
-	switch self.FlushPolicy {
+func (conf *cacheflushConfig) isValidPolicy() bool {
+	switch conf.FlushPolicy {
 	case
 		"oldest-first",
 		"least-accessed",
@@ -46,7 +48,7 @@ func (self *cacheflushConfig) isValidPolicy() bool {
 	return false
 }
 
-func (self *cacheflushConfig) loadConfiguration(configFile string) {
+func (conf *cacheflushConfig) loadConfiguration(configFile string) {
 	fmt.Println("Loading config...")
 
 	// Confirm config file exists, check local dir if not provided
@@ -77,41 +79,37 @@ func (self *cacheflushConfig) loadConfiguration(configFile string) {
 	}
 
 	// Read config file into Config object
-	err = yaml.Unmarshal(data, &self)
+	err = yaml.Unmarshal(data, &conf)
 	if err != nil {
 		fmt.Println("Faled to Unmarshal config: ", err)
 		panic("Faled to Unmarshal config")
 	}
 
 	// Validate Log Settings
-	if self.LogFile == "" {
+	if conf.LogFile == "" {
 		fmt.Println("LogFile not configured.")
 		panic("LogFile not configured.")
 	}
 
-	// Validate Runtime Settings
-	if self.RunUID == 0 || self.RunGID == 0 {
-		fmt.Println("RunUID and/or RunGID not configured.")
-		panic("RunUID and/or RunGID not configured.")
-	}
+	// Validate Permissions Settings TODO
 
 	// Validate Path Settings
-	if self.BackingPool == "" {
+	if conf.BackingPool == "" {
 		fmt.Println("BackingPool not configured.")
 		panic("BackingPool not configured.")
 	} else {
-		_, err := os.Stat(self.BackingPool)
+		_, err := os.Stat(conf.BackingPool)
 		if os.IsNotExist(err) {
-			fmt.Printf("Backing pool: %v does not exist", self.BackingPool)
+			fmt.Printf("Backing pool: %v does not exist", conf.BackingPool)
 			panic("Configured BackingPool does not exist")
 		}
 	}
 
-	if self.CacheDrives == nil {
+	if conf.CacheDrives == nil {
 		fmt.Println("CacheDrives not configured.")
 		panic("CacheDrives not configured.")
 	} else {
-		for _, cacheDrive := range self.CacheDrives {
+		for _, cacheDrive := range conf.CacheDrives {
 			_, err := os.Stat(cacheDrive)
 			if os.IsNotExist(err) {
 				fmt.Printf("Cache drive: %v does not exist or is inaccessible", cacheDrive)
@@ -121,48 +119,42 @@ func (self *cacheflushConfig) loadConfiguration(configFile string) {
 	}
 
 	// Validate Behavior Settings
-	if self.ForceFreeSpace == "" {
+	if conf.ForceFreeSpace == "" {
 		fmt.Println("ForceFreeSpace not configured.")
 		panic("ForceFreeSpace not configured.")
 	} else {
 		// TODO validate input string
 	}
-	if self.MinimumAge == "" {
+	if conf.MinimumAge == "" {
 		fmt.Println("MinimumAge not configured.")
 		panic("MinimumAge not configured.")
 	} else {
 		// TODO validate input string
 	}
-	if self.MaximumAge == "" {
-		fmt.Println("MaximumAge not configured.")
-		panic("MaximumAge not configured.")
-	} else {
-		// TODO validate input string
-	}
-	if self.CurrentAccessThreshold == "" {
+	if conf.CurrentAccessThreshold == "" {
 		fmt.Println("CurrentAccessThreshold not configured.")
 		panic("CurrentAccessThreshold not configured.")
 	} else {
 		// TODO validate input string
 	}
-	if self.FlushPolicy == "" {
+	if conf.FlushPolicy == "" {
 		fmt.Println("FlushPolicy not configured.")
 		panic("FlushPolicy not configured.")
-	} else if self.isValidPolicy() == false {
+	} else if conf.isValidPolicy() == false {
 		fmt.Println("&v is not a valid FlushPolicy.")
 		panic("Invalid FlushPolicy configured.")
 	}
 
 	// Validate Pushover keys present if enabled
-	if self.PushoverEnabled == true {
-		if self.PushoverAppKey == "" {
+	if conf.PushoverEnabled == true {
+		if conf.PushoverAppKey == "" {
 			fmt.Println("Pushover enabled but AppKey not provided, disabling pushover")
 			config.PushoverEnabled = false
-		} else if self.PushoverUserKey == "" {
+		} else if conf.PushoverUserKey == "" {
 			fmt.Println("Pushover enabled but UserKey not provided, disabling pushover")
 			config.PushoverEnabled = false
 		}
 	}
 
-	fmt.Printf("config: %+v\n", self)
+	fmt.Printf("config: %+v\n", conf)
 }

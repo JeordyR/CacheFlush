@@ -3,7 +3,9 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -33,15 +35,21 @@ type fileDetails struct {
 }
 
 func main() {
-	// Check for updates
-	doSelfUpdate()
-
 	// Parse input
 	configFile := flag.String("config", "", "Path to configuration file.")
+	skipMove := flag.Bool("skipmove", false, "True/false if we should skip moving files, useful for debugging.")
+	force := flag.Bool("force", false, "Force flush all files (not including override) regardless of age, access time, etc.")
 	flag.Parse()
 
 	// Load configuration
 	config.loadConfiguration(*configFile)
+
+	if *skipMove == true {
+		config.SkipMove = true
+	}
+	if *force == true {
+		config.Force = true
+	}
 
 	// Setup logger
 	file, err := os.OpenFile(config.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0664)
@@ -55,6 +63,11 @@ func main() {
 	log.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp: true,
 	})
+	if config.DebugLogging == true {
+		log.SetLevel(logrus.DebugLevel)
+	} else {
+		log.SetLevel(logrus.InfoLevel)
+	}
 
 	// Send Pushover notification that cacheflush starting
 	log.Info("============= New CacheFlush Execution =============")
@@ -69,20 +82,20 @@ func main() {
 		// Get disk free space
 		diskInfo, _ := disk.GetInfo(cacheDrive)
 		var startingFreeSpace int = int(diskInfo.Free)
-		log.Info("Starting disk free space: ", startingFreeSpace)
+		log.Infof("Starting disk free space: %vGB", startingFreeSpace/1073741824)
 
 		// Get cached files (flush method and settings processed in this function)
-		okToMove, dontMove, tooNewToMove := getCachedFiles(cacheDrive)
-		log.Debug("okToMove files: ", okToMove)
-		log.Debug("dontMove files: ", okToMove)
-		log.Debug("tooNewToMove files: ", okToMove)
+		okToMove, recentAccess, newlyAdded := getCachedFiles(cacheDrive)
+		log.Info("okToMove files: ", len(okToMove))
+		log.Info("newlyAdded files: ", len(newlyAdded))
+		log.Info("recentAccess files: ", len(recentAccess))
 		sendPushoverMessage(
 			"okToMove files: ",
-			string(len(okToMove)),
-			"\ndontMove files: ",
-			string(len(dontMove)),
-			"\ntooNewToMove files: ",
-			string(len(tooNewToMove)),
+			strconv.Itoa(len(okToMove)),
+			"\nnewlyAdded files: ",
+			strconv.Itoa(len(newlyAdded)),
+			"\nrecentAccess files: ",
+			strconv.Itoa(len(recentAccess)),
 		)
 
 		// Move the okToMove files
@@ -94,26 +107,37 @@ func main() {
 		var requiredFreeSpace int = bytes(config.ForceFreeSpace)
 		var diskFreeSpace int = startingFreeSpace
 
-		// Flush dontMove files until drive meets ForceFreeSpace
-		for _, file := range dontMove {
+		// Flush newlyAdded files until drive meets ForceFreeSpace
+		for _, file := range newlyAdded {
 			diskInfo, _ := disk.GetInfo(cacheDrive)
 			diskFreeSpace = int(diskInfo.Free)
-			if diskFreeSpace <= requiredFreeSpace {
+			if diskFreeSpace >= requiredFreeSpace {
+				log.Debugf("Disk free space of %vGB is greater than ForceFreeSpace of %v, skipping further movement of newlyAdded files.", diskFreeSpace/1073741824, config.ForceFreeSpace)
 				break
 			}
+			log.Debugf("Disk free space of %vGB is lower than ForceFreeSpace of %v, moving additional newlyAdded file.", diskFreeSpace/1073741824, config.ForceFreeSpace)
 			moveFile(file, cacheDrive)
 			movedFiles++
 		}
 
-		// Flush tooNewToMove files until drive meets ForceFressSpace
-		for _, file := range tooNewToMove {
+		// Flush recentlyAccessed files until drive meets ForceFreeSpace
+		for _, file := range recentAccess {
 			diskInfo, _ := disk.GetInfo(cacheDrive)
 			diskFreeSpace = int(diskInfo.Free)
-			if diskFreeSpace <= requiredFreeSpace {
+			if diskFreeSpace >= requiredFreeSpace {
+				log.Debugf("Disk free space of %vGB is >= to ForceFreeSpace of %v, skipping further movement of dontMove files.", diskFreeSpace/1073741824, config.ForceFreeSpace)
 				break
 			}
+			log.Debugf("Disk free space of %vGB is lower than ForceFreeSpace of %v, moving additional recentlyAccessed file.", diskFreeSpace/1073741824, config.ForceFreeSpace)
 			moveFile(file, cacheDrive)
 			movedFiles++
+		}
+
+		// Clean up empty dirs if enabled
+		if config.ClearEmptyDirs == true {
+			// Create destination directory path if not present on BackingPool
+			cmd := exec.Command("find", cacheDrive, "-empty", "-type", "d", "-delete")
+			cmd.Run()
 		}
 
 		// Log disk completion
@@ -126,9 +150,9 @@ func main() {
 		)
 		sendPushoverMessage(
 			"Done processing drive: ", cacheDrive,
-			"\nMoved files: ", string(movedFiles),
-			"\nFree Space Before: ", string(startingFreeSpace/1073741824),
-			"GB\nFree Space After: ", string(diskFreeSpace/1073741824), "GB",
+			"\nMoved files: ", strconv.Itoa(movedFiles),
+			"\nFree Space Before: ", strconv.Itoa(startingFreeSpace/1073741824),
+			"GB\nFree Space After: ", strconv.Itoa(diskFreeSpace/1073741824), "GB",
 		)
 	}
 
@@ -178,50 +202,58 @@ func sendPushoverMessage(message string, messageArgs ...string) {
 	}
 
 	log.Debug("Pushover response: ", response)
+
+	// Short sleep to ensure rapid messages arrive in order
+	time.Sleep(1)
 }
 
 func getCachedFiles(cacheDrive string) ([]fileDetails, []fileDetails, []fileDetails) {
-	var dontMove []fileDetails
+	var recentAccess []fileDetails
 	var okToMove []fileDetails
-	var tooNewToMove []fileDetails
+	var newlyAdded []fileDetails
 
 	// Get all files on cacheDrive, ignoring any in OverrideDirectories
-	err := filepath.Walk(cacheDrive, processFile(&dontMove, &okToMove, &tooNewToMove))
+	err := filepath.Walk(cacheDrive, processFile(&recentAccess, &okToMove, &newlyAdded))
 	if err != nil {
 		log.Panic("Failed to parse files on cache drive with error: ", err)
+	}
+
+	// Return early if forced
+	if config.Force == true {
+		return okToMove, recentAccess, newlyAdded
 	}
 
 	// Sort dontMove and tooNewTomove slices based on FlushPolicy
 	if config.FlushPolicy == "oldest-first" {
 		// Oldest files (lowest epoch time) first
-		sort.Slice(dontMove, func(i, j int) bool {
-			return dontMove[i].ModTime.Unix() < dontMove[j].ModTime.Unix()
+		sort.Slice(recentAccess, func(i, j int) bool {
+			return recentAccess[i].ModTime.Unix() < recentAccess[j].ModTime.Unix()
 		})
-		sort.Slice(tooNewToMove, func(i, j int) bool {
-			return dontMove[i].ModTime.Unix() < dontMove[j].ModTime.Unix()
+		sort.Slice(newlyAdded, func(i, j int) bool {
+			return newlyAdded[i].ModTime.Unix() < newlyAdded[j].ModTime.Unix()
 		})
 	} else if config.FlushPolicy == "least-accessed" {
 		// Least/oldest accessed files (lowest epoch time) first
-		sort.Slice(dontMove, func(i, j int) bool {
-			return dontMove[i].AccessTime.Unix() < dontMove[j].AccessTime.Unix()
+		sort.Slice(recentAccess, func(i, j int) bool {
+			return recentAccess[i].AccessTime.Unix() < recentAccess[j].AccessTime.Unix()
 		})
-		sort.Slice(tooNewToMove, func(i, j int) bool {
-			return tooNewToMove[i].AccessTime.Unix() < tooNewToMove[j].AccessTime.Unix()
+		sort.Slice(newlyAdded, func(i, j int) bool {
+			return newlyAdded[i].AccessTime.Unix() < newlyAdded[j].AccessTime.Unix()
 		})
 	} else if config.FlushPolicy == "largest-first" {
 		// Largest files first
-		sort.Slice(dontMove, func(i, j int) bool {
-			return dontMove[i].Size > dontMove[j].Size
+		sort.Slice(recentAccess, func(i, j int) bool {
+			return recentAccess[i].Size > recentAccess[j].Size
 		})
-		sort.Slice(tooNewToMove, func(i, j int) bool {
-			return tooNewToMove[i].Size > tooNewToMove[j].Size
+		sort.Slice(newlyAdded, func(i, j int) bool {
+			return newlyAdded[i].Size > newlyAdded[j].Size
 		})
 	}
 
-	return okToMove, dontMove, tooNewToMove
+	return okToMove, recentAccess, newlyAdded
 }
 
-func processFile(dontMove *[]fileDetails, okToMove *[]fileDetails, tooNewToMove *[]fileDetails) filepath.WalkFunc {
+func processFile(recentAccess *[]fileDetails, okToMove *[]fileDetails, newlyAdded *[]fileDetails) filepath.WalkFunc {
 	return func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			log.Error("Encoutered error walking files: ", err)
@@ -245,19 +277,21 @@ func processFile(dontMove *[]fileDetails, okToMove *[]fileDetails, tooNewToMove 
 			Path:       path,
 			Size:       info.Size(),
 			ModTime:    info.ModTime(),
-			AccessTime: info.Sys().(*syscall.Stat_t).Atim,
+			AccessTime: time.Unix(info.Sys().(*syscall.Stat_t).Atim.Sec, 0),
 		}
 
 		// Process files into slices based on config filters
-		if config.MaximumAge != "" && time.Now().Unix()-fileDetail.ModTime.Unix() >= seconds(config.MaximumAge) {
-			// File older than MaximumAge threshold
+		if config.Force == true {
+			log.Debugf("Force enabled, adding file %v to okToMove", fileDetail.Path)
 			*okToMove = append(*okToMove, fileDetail)
-		} else if config.MinimumAge != "" && time.Now().Unix()-fileDetail.ModTime.Unix() <= seconds(config.MinimumAge) {
-			// File newer than MinimumAge threshold
-			*tooNewToMove = append(*tooNewToMove, fileDetail)
 		} else if config.CurrentAccessThreshold != "" && time.Now().Unix()-fileDetail.AccessTime.Unix() <= seconds(config.CurrentAccessThreshold) {
 			// File accessed more recently than current access threshold
-			*dontMove = append(*dontMove, fileDetail)
+			log.Debugf("File %v has been accessed recently.", fileDetail.Path)
+			*recentAccess = append(*recentAccess, fileDetail)
+		} else if config.MinimumAge != "" && time.Now().Unix()-fileDetail.ModTime.Unix() <= seconds(config.MinimumAge) {
+			// File newer than MinimumAge threshold
+			log.Debugf("File %v is too new to move.", fileDetail.Path)
+			*newlyAdded = append(*newlyAdded, fileDetail)
 		} else {
 			*okToMove = append(*okToMove, fileDetail)
 		}
@@ -267,23 +301,24 @@ func processFile(dontMove *[]fileDetails, okToMove *[]fileDetails, tooNewToMove 
 }
 
 func seconds(duration string) int64 {
-	durationRegex := regexp.MustCompile(`(?P<years>\d+y)?(?P<months>\d+M)?(?P<days>\d+d)?(?P<hours>\d+h)?(?P<minutes>\d+m)?(?P<seconds>\d+s)?`)
+	durationRegex := regexp.MustCompile(`(?P<years>\d+y)?(?P<months>\d+M)?(?P<weeks>\d+w)?(?P<days>\d+d)?(?P<hours>\d+h)?(?P<minutes>\d+m)?(?P<seconds>\d+s)?`)
 	matches := durationRegex.FindStringSubmatch(duration)
 
-	years := ParseInt64(matches[1])
-	months := ParseInt64(matches[2])
-	days := ParseInt64(matches[3])
-	hours := ParseInt64(matches[4])
-	minutes := ParseInt64(matches[5])
-	seconds := ParseInt64(matches[6])
+	years := parseInt64(matches[1])
+	months := parseInt64(matches[2])
+	weeks := parseInt64(matches[3])
+	days := parseInt64(matches[4])
+	hours := parseInt64(matches[5])
+	minutes := parseInt64(matches[6])
+	seconds := parseInt64(matches[7])
 
 	hour := int64(time.Hour.Seconds())
 	minute := int64(time.Minute.Seconds())
 	second := int64(time.Second.Seconds())
-	return years*24*365*hour + months*30*24*hour + days*24*hour + hours*hour + minutes*minute + seconds*second
+	return years*365*24*hour + months*30*24*hour + weeks*7*24*hour + days*24*hour + hours*hour + minutes*minute + seconds*second
 }
 
-func ParseInt64(value string) int64 {
+func parseInt64(value string) int64 {
 	if len(value) == 0 {
 		return 0
 	}
@@ -298,14 +333,14 @@ func bytes(value string) int {
 	sizeRegex := regexp.MustCompile(`(?P<years>\d+TB)?(?P<months>\d+GB)?(?P<days>\d+MB)?`)
 	matches := sizeRegex.FindStringSubmatch(value)
 
-	tb := ParseInt(matches[1]) * 1099511627776
-	gb := ParseInt(matches[2]) * 1073741824
-	mb := ParseInt(matches[3]) * 1048576
+	tb := parseInt(matches[1]) * 1099511627776
+	gb := parseInt(matches[2]) * 1073741824
+	mb := parseInt(matches[3]) * 1048576
 
 	return tb + gb + mb
 }
 
-func ParseInt(value string) int {
+func parseInt(value string) int {
 	if len(value) == 0 {
 		return 0
 	}
@@ -321,9 +356,76 @@ func moveFile(sourceFile fileDetails, cacheDrive string) {
 	destinationFile := strings.Replace(sourceFile.Path, cacheDrive, config.BackingPool, -1)
 	destinationDirectory := filepath.Dir(destinationFile)
 
-	log.Debugf("Moving file %v to %v...", sourceFile, destinationFile)
+	if config.SkipMove == true {
+		log.Debugf("Skipping move operation, would have moved: %v to %v", sourceFile.Path, destinationFile)
+	} else {
+		if _, err := os.Stat(destinationDirectory); os.IsNotExist(err) {
+			// Create destination directory path if not present on BackingPool
+			cmd := exec.Command("mkdir", "-p", destinationDirectory)
+			_ = syscall.Umask(002)
+			cmd.SysProcAttr = &syscall.SysProcAttr{}
+			cmd.SysProcAttr.Credential = &syscall.Credential{Uid: config.OwnerUID, Gid: config.OwnerGID}
+			cmd.Run()
+		}
 
-	// Confirm source file exists, create destination directory path if not present on BackingPool TODO
+		// Move the file from cacheDrive to BackingPool
+		if _, err := os.Stat(destinationFile); os.IsNotExist(err) {
+			log.Debugf("Moving file %v to %v...", sourceFile.Path, destinationFile)
 
-	// Move the file from cacheDrive to BackingPool TOOD
+			err := moveOperation(sourceFile.Path, destinationFile)
+			if err != nil {
+				log.Error("Failed to move file with error: ", err)
+			}
+
+		} else {
+			log.Errorf("Failed to move %v to %v, file already exists.", sourceFile.Path, destinationFile)
+		}
+
+	}
+}
+
+func moveOperation(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("Couldn't open source file: %s", err)
+	}
+
+	out, err := os.Create(dst)
+	if err != nil {
+		in.Close()
+		return fmt.Errorf("Couldn't open dest file: %s", err)
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	in.Close()
+	if err != nil {
+		return fmt.Errorf("Writing to output file failed: %s", err)
+	}
+
+	err = out.Sync()
+	if err != nil {
+		return fmt.Errorf("Sync error: %s", err)
+	}
+
+	_, err = os.Stat(src)
+	if err != nil {
+		return fmt.Errorf("Stat error: %s", err)
+	}
+
+	err = os.Chown(dst, int(config.OwnerUID), int(config.OwnerGID))
+	if err != nil {
+		return fmt.Errorf("Chown error: %s", err)
+	}
+
+	err = os.Chmod(dst, 0775)
+	if err != nil {
+		return fmt.Errorf("Chmod error: %s", err)
+	}
+
+	err = os.Remove(src)
+	if err != nil {
+		return fmt.Errorf("Failed removing original file: %s", err)
+	}
+	return nil
 }
